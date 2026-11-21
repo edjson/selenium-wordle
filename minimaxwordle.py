@@ -18,6 +18,12 @@ def resource_path(relative_path):
 with open(resource_path("words.txt"), "r") as file:
     ALL_WORDS = [line.strip().lower() for line in file if len(line.strip()) == 5]
 
+# Every word NYT accepts as a guess (matches the list in the live game). NYT has
+# picked answers outside words.txt, so the solver falls back to this list when no
+# word in words.txt fits.
+with open(resource_path("allowed.txt"), "r") as file:
+    ALLOWED_WORDS = list(dict.fromkeys(line.strip().lower() for line in file if len(line.strip()) == 5))
+
 options = webdriver.ChromeOptions()
 options.headless = False
 # Selenium Manager (built into Selenium 4.6+) finds Chrome and a matching driver,
@@ -141,8 +147,10 @@ def start_game(timeout=90, settle=3):
 
 def solve():
     possible = ALL_WORDS[:]
+    nyt_words = ALLOWED_WORDS[:]  # every NYT word that still fits the feedback
     probes_used = 0
     used_guesses = set()
+    using_allowed = False
 
     for attempt in range(1, 7):
         if attempt == 1:
@@ -176,9 +184,17 @@ def solve():
         possible = filter_possible(possible, guess, states)
         if guess in possible:
             possible.remove(guess)
+        nyt_words = filter_possible(nyt_words, guess, states)
+        if guess in nyt_words:
+            nyt_words.remove(guess)
+
+        if not possible and not using_allowed:
+            print("Answer isn't in words.txt; switching to allowed.txt.")
+            using_allowed = True
+            possible = nyt_words[:]
 
         if not possible:
-            print("No word in words.txt matches the feedback.")
+            print("No word matches the feedback.")
             return
 
         time.sleep(0.6)
