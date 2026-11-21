@@ -3,6 +3,7 @@ import os
 import numpy as np
 import torch
 from tqdm import tqdm
+from collections import Counter
 
 
 first_guess = "soare"
@@ -39,8 +40,14 @@ def make_table():
         s_exp  = secrets[:, None, :, None].int()
         g_exp  = guesses[None, :, None, :].int()
         match  = (s_exp == g_exp)
-        valid  = match & ~green[:, :, :, None] & ~green[:, :, None, :]
-        yellow = valid.any(dim=2) & ~green
+        # A repeated guess letter only turns yellow as many times as that letter is
+        # left in the secret's non-green spots (left to right); extra copies are grey.
+        # e.g. secret "aback", guess "bobby": only the first b is yellow.
+        avail  = (match & ~green[:, :, :, None]).sum(dim=2)
+        same   = guesses[:, :, None] == guesses[:, None, :]
+        before = torch.tril(torch.ones(5, 5, dtype=torch.bool, device=DEVICE), diagonal=-1)
+        rank   = ((same & before)[None] & ~green[:, :, None, :]).sum(dim=-1)
+        yellow = ~green & (rank < avail)
         colours = torch.where(green, torch.tensor(2, device=DEVICE),
                   torch.where(yellow, torch.tensor(1, device=DEVICE),
                                       torch.tensor(0, device=DEVICE)))
@@ -102,6 +109,7 @@ def solve_all():
 
             if observed_key == WIN_KEY:
                 solved = True
+                guess_counts[attempt] += 1
                 break
 
             feedback_col = table[:, guess_idx].long()
@@ -116,7 +124,14 @@ def solve_all():
 
     return failed
 
+guess_counts = Counter()
 failed = solve_all()
+solved = sum(guess_counts.values())
+print("\nGuesses needed:")
+for n in sorted(guess_counts):
+    print(f"  {n}: {guess_counts[n]}")
+if solved:
+    print(f"Average: {sum(n * c for n, c in guess_counts.items()) / solved:.3f}")
 print(f"\nTotal fails: {len(failed)}")
 if failed:
     print(f"Failed words: {failed}")
