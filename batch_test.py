@@ -66,7 +66,7 @@ def best_guess(possible_mask, search_mask, used_mask):
 
     if len(search_idx) == 0:
         fallback = (possible_mask & ~used_mask).nonzero(as_tuple=True)[0]
-        return fallback[0].item() if len(fallback) > 0 else candidate_idx[0].item()
+        return (fallback[0].item() if len(fallback) > 0 else candidate_idx[0].item()), float("inf")
     sub = table[candidate_idx][:, search_idx].long()  
 
     num_cands = len(candidate_idx)
@@ -78,8 +78,10 @@ def best_guess(possible_mask, search_mask, used_mask):
         torch.ones(num_search, num_cands, dtype=torch.int32, device=DEVICE)
     )
     worst = bucket_counts.max(dim=1).values      
-    best_local = worst.argmin().item()
-    return search_idx[best_local].item()
+    # On a tie, prefer a word that could still be the answer (same as minimaxwordle.py).
+    not_candidate = (~possible_mask[search_idx]).int()
+    best_local = (worst * 2 + not_candidate).argmin().item()
+    return search_idx[best_local].item(), worst[best_local].item()
 
 
 def solve_all():
@@ -98,11 +100,13 @@ def solve_all():
 
             if attempt == 1:
                 guess_idx = FIRST_GUESS_IDX
-            elif num_possible <= 6 and remaining_attempts >= 2 and probes_used < 2:
-                guess_idx = best_guess(possible_mask, all_mask, used_mask)
-                probes_used += 1
             else:
-                guess_idx = best_guess(possible_mask, possible_mask, used_mask)
+                guess_idx, worst = best_guess(possible_mask, possible_mask, used_mask)
+                if num_possible >= 3 and remaining_attempts >= 2 and probes_used < 2:
+                    probe_idx, probe_worst = best_guess(possible_mask, all_mask, used_mask)
+                    if probe_worst < worst:
+                        guess_idx = probe_idx
+                        probes_used += 1
 
             used_mask[guess_idx] = True
             observed_key = secret_feedback_row[guess_idx].item()

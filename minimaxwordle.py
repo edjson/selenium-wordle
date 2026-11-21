@@ -58,11 +58,15 @@ def choose_minimax_guess(possible, banned):
         if worst < best_score:
             best_score = worst
             best = g
-    return best
+    return best, best_score
 
 def choose_probe_guess(possible, all_words, banned):
+    # On a tie, prefer a word that could still be the answer: it splits the
+    # remaining words just as well and might win outright. Without this, a tie
+    # goes to whatever comes first alphabetically ("aback", "abase", ...).
+    candidates = set(possible)
     best = None
-    best_score = float("inf")
+    best_score = (float("inf"), True)
     for g in all_words:
         if g in banned:
             continue
@@ -70,11 +74,11 @@ def choose_probe_guess(possible, all_words, banned):
         for s in possible:
             k = sim_feedback(s, g)
             buckets[k] = buckets.get(k, 0) + 1
-        worst = max(buckets.values())
-        if worst < best_score:
-            best_score = worst
+        score = (max(buckets.values()), g not in candidates)
+        if score < best_score:
+            best_score = score
             best = g
-    return best
+    return best, best_score[0]
 
 def type_guess(word):
     dismiss_popups()
@@ -142,14 +146,18 @@ def solve():
 
     for attempt in range(1, 7):
         if attempt == 1:
-            guess = "soare"  
+            guess = "soare"
         else:
             remaining_attempts = 6 - attempt
-            if len(possible) <= 6 and remaining_attempts >= 2 and probes_used < 2:
-                guess = choose_probe_guess(possible, ALL_WORDS, used_guesses)
-                probes_used += 1
-            else:
-                guess = choose_minimax_guess(possible, used_guesses)
+            guess, worst = choose_minimax_guess(possible, used_guesses)
+            # Only spend a guess on a probe when it splits the remaining words
+            # better than guessing one of them. With 1-2 words left, guessing one
+            # of them is always at least as good.
+            if len(possible) >= 3 and remaining_attempts >= 2 and probes_used < 2:
+                probe, probe_worst = choose_probe_guess(possible, ALL_WORDS, used_guesses)
+                if probe_worst < worst:
+                    guess = probe
+                    probes_used += 1
         if not guess:
             guess = next((w for w in possible if w not in used_guesses), None)
             if not guess:
