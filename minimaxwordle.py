@@ -1,5 +1,4 @@
 from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
@@ -7,7 +6,6 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import (
     StaleElementReferenceException, TimeoutException, WebDriverException,
 )
-from webdriver_manager.chrome import ChromeDriverManager
 from collections import Counter
 import time
 import sys
@@ -22,8 +20,9 @@ with open(resource_path("words.txt"), "r") as file:
 
 options = webdriver.ChromeOptions()
 options.headless = False
-service = Service(ChromeDriverManager().install())
-driver = webdriver.Chrome(service=service, options=options)
+# Selenium Manager (built into Selenium 4.6+) finds Chrome and a matching driver,
+# and downloads Chrome for Testing if Chrome isn't installed (e.g. in WSL).
+driver = webdriver.Chrome(options=options)
 
 def sim_feedback(secret, guess):
     out = ["absent"] * 5
