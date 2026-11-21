@@ -7,6 +7,7 @@ from selenium.common.exceptions import (
     StaleElementReferenceException, TimeoutException, WebDriverException,
 )
 from collections import Counter
+from itertools import chain
 import time
 import sys
 import os
@@ -20,7 +21,7 @@ with open(resource_path("words.txt"), "r") as file:
 
 # Every word NYT accepts as a guess (matches the list in the live game). NYT has
 # picked answers outside words.txt, so the solver falls back to this list when no
-# word in words.txt fits.
+# word in words.txt fits, and uses it to break ties before that.
 with open(resource_path("allowed.txt"), "r") as file:
     ALLOWED_WORDS = list(dict.fromkeys(line.strip().lower() for line in file if len(line.strip()) == 5))
 
@@ -46,45 +47,99 @@ def sim_feedback(secret, guess):
                 remaining[ch] -= 1
     return tuple(out)
 
+WIN = ("correct",) * 5
+
 def filter_possible(possible, guess, observed_states):
     obs = tuple(observed_states)
     return [w for w in possible if sim_feedback(w, guess) == obs]
 
-def choose_minimax_guess(possible, banned):
-    best = None
-    best_score = float("inf")
-    for g in possible:
-        if g in banned:
-            continue
-        buckets = {}
-        for s in possible:
-            k = sim_feedback(s, g)
-            buckets[k] = buckets.get(k, 0) + 1
-        worst = max(buckets.values())
-        if worst < best_score:
-            best_score = worst
-            best = g
-    return best, best_score
+def buckets(guess, words):
+    """How many of `words` give each feedback pattern for `guess`."""
+    counts = {}
+    for s in words:
+        k = sim_feedback(s, guess)
+        counts[k] = counts.get(k, 0) + 1
+    return counts
 
-def choose_probe_guess(possible, all_words, banned):
+def break_tie(ties, nyt_words):
+    # These guesses are equally good for words.txt. Take the one that best splits
+    # every NYT word that still fits, so that if the answer isn't in words.txt there
+    # is less left to sort out. List order breaks any remaining tie.
+    if len(ties) == 1 or len(nyt_words) <= 1:
+        return ties[0]
+    return min(ties, key=lambda g: max(buckets(g, nyt_words).values()))
+
+def choose_minimax_guess(possible, banned, nyt_words):
+    scores = {g: max(buckets(g, possible).values()) for g in possible if g not in banned}
+    if not scores:
+        return None, float("inf")
+    best = min(scores.values())
+    ties = [g for g, s in scores.items() if s == best]
+    return break_tie(ties, nyt_words), best
+
+def choose_probe_guess(possible, all_words, banned, nyt_words):
     # On a tie, prefer a word that could still be the answer: it splits the
     # remaining words just as well and might win outright. Without this, a tie
     # goes to whatever comes first alphabetically ("aback", "abase", ...).
     candidates = set(possible)
-    best = None
-    best_score = (float("inf"), True)
-    for g in all_words:
-        if g in banned:
-            continue
-        buckets = {}
-        for s in possible:
-            k = sim_feedback(s, g)
-            buckets[k] = buckets.get(k, 0) + 1
-        score = (max(buckets.values()), g not in candidates)
-        if score < best_score:
-            best_score = score
-            best = g
-    return best, best_score[0]
+    scores = {
+        g: (max(buckets(g, possible).values()), g not in candidates)
+        for g in all_words if g not in banned
+    }
+    best = min(scores.values())
+    ties = [g for g, s in scores.items() if s == best]
+    return break_tie(ties, nyt_words), best[0]
+
+def can_separate(words):
+    """True if some guess gives every word in `words` a different feedback, so each
+    one can be solved within 2 guesses."""
+    if len(words) <= 2:
+        return True
+    key = tuple(words)
+    if key not in _separable:
+        _separable[key] = any(
+            len(buckets(g, words)) == len(words)
+            for g in chain(words, ALL_WORDS, ALLOWED_WORDS)
+        )
+    return _separable[key]
+
+_separable = {}
+
+def is_safe(guess, possible, guesses_left):
+    # Can every remaining words.txt word still be guaranteed within `guesses_left`
+    # (this guess included)?
+    groups = {}
+    for s in possible:
+        groups.setdefault(sim_feedback(s, guess), []).append(s)
+    if guesses_left == 2:
+        return all(len(g) == 1 for g in groups.values())
+    return all(can_separate(g) for k, g in groups.items() if k != WIN)
+
+def choose_late_guess(possible, nyt_words, banned, guesses_left):
+    # In the last 2-3 guesses, words.txt may have only a word or two left while
+    # many other NYT words still fit. Guessing the words.txt words first can then
+    # run out of guesses if the answer is one of the others (e.g. "mommy",
+    # "nervy"). Instead, pick the NYT word that leaves the most NYT words
+    # solvable, but only from guesses that still guarantee every words.txt word.
+    in_possible, in_nyt = set(possible), set(nyt_words)
+    def score(g):
+        b = buckets(g, nyt_words)
+        return (-len(b), g not in in_possible, g not in in_nyt, max(b.values()))
+    ranked = sorted((g for g in ALLOWED_WORDS if g not in banned), key=score)
+    return next((g for g in ranked if is_safe(g, possible, guesses_left)), None)
+
+def choose_fallback_guess(possible, banned, guesses_left):
+    # The answer isn't in words.txt, so any remaining NYT word is about as likely.
+    # Pick the guess (from every NYT word) that splits them into the most groups:
+    # when only one guess is left after this one, every group of one is a sure
+    # win. Ties go to a word that could be the answer, then the smallest group.
+    if len(possible) <= 2 or guesses_left == 1:
+        return possible[0]
+    candidates = set(possible)
+    def score(g):
+        b = buckets(g, possible)
+        return (-len(b), g not in candidates, max(b.values()))
+    return min((g for g in ALLOWED_WORDS if g not in banned), key=score)
 
 def type_guess(word):
     dismiss_popups()
@@ -155,14 +210,20 @@ def solve():
     for attempt in range(1, 7):
         if attempt == 1:
             guess = "soare"
+        elif using_allowed:
+            guess = choose_fallback_guess(possible, used_guesses, 7 - attempt)
+        elif 7 - attempt in (2, 3) and len(nyt_words) > len(possible) and (
+            late := choose_late_guess(possible, nyt_words, used_guesses, 7 - attempt)
+        ):
+            guess = late
         else:
             remaining_attempts = 6 - attempt
-            guess, worst = choose_minimax_guess(possible, used_guesses)
+            guess, worst = choose_minimax_guess(possible, used_guesses, nyt_words)
             # Only spend a guess on a probe when it splits the remaining words
             # better than guessing one of them. With 1-2 words left, guessing one
             # of them is always at least as good.
             if len(possible) >= 3 and remaining_attempts >= 2 and probes_used < 2:
-                probe, probe_worst = choose_probe_guess(possible, ALL_WORDS, used_guesses)
+                probe, probe_worst = choose_probe_guess(possible, ALL_WORDS, used_guesses, nyt_words)
                 if probe_worst < worst:
                     guess = probe
                     probes_used += 1
